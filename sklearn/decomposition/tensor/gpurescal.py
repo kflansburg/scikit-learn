@@ -1,5 +1,9 @@
 import logging
-logger = logging.getLogger()
+_log = logging.getLogger('RESCAL')
+
+from sklearn.metrics import precision_recall_curve, auc
+from sklearn.utils.validation import check_random_state
+
 import sys
 import time
 import numpy as np
@@ -26,14 +30,13 @@ from skcuda.linalg import transpose as gpu_transpose
 
 from theano.sandbox.cuda.blas import gpucsrmm2, csr_gpu, gpu_svd, gpucsrmm2_2
 
-
 config.optimizer='fast_run'
 config.exception_verbosity='high'
 config.floatX = 'float32'
 
 
 class RESCAL:
-    def __init__(self, maxIter=25, maxVec=100):
+    def __init__(self, maxIter=50, maxVec=100):
         self.maxIter = maxIter
         self.lambda_A = shared(np.float32(0.0))
         self.lambda_R = shared(np.float32(0.0))
@@ -41,23 +44,21 @@ class RESCAL:
         self.maxVec=maxVec
 
     def _update_R(self, Ap):
+
         U, S, Vt = gpu_svd(Ap)
 
         Shat = TH.outer(S,S)
         Shat = Shat / ((Shat ** 2) + self.lambda_R) 
+
         R = TH.stack([TH.dot(Vt.T, TH.dot((Shat * TH.dot(U.T,gpucsrmm2(x,U))),Vt)) for x in self.X])
-        if self.history:
-            return R, Shat, S
-        else:
-            return R
+
+        return R, U, S, Vt, Shat
     
     def _update_A(self, Ap, Rp):
         AtA = TH.dot(Ap.T, Ap)
         F = TH.zeros((self.n, self.rank))
         for i in range(len(self.X)): 
-            #F += gpucsrmm2(self.X[i], TH.dot(Ap, Rp[i].T))  
             F += gpucsrmm2_2(self.X[i], Ap, Rp[i].T)  
-            #F += gpucsrmm2(self.X[i], TH.dot(Ap, Rp[i]), transposeA = True) 
             F += gpucsrmm2_2(self.X[i], Ap, Rp[i], transposeA = True) 
 
         E = TH.zeros((self.rank, self.rank))
@@ -66,10 +67,7 @@ class RESCAL:
 
         I = self.lambda_A * TH.eye(self.rank)
 
-        if self.history:
-            return slinalg.solve(I+E.T, F.T).T, F, E
-        else:
-            return slinalg.solve(I+E.T, F.T).T
+        return slinalg.solve(I+E.T, F.T).T, F, E
         
     def _check_input_tensor(self,X):
         """ Check that the tensor X is well formed:
@@ -93,7 +91,7 @@ class RESCAL:
         self.n = n
         self.k = len(self.X)
        
-        print "\tInitializing A".ljust(30),
+        _log.debug("Initializing A")
         sys.stdout.flush()
         tic = time.time()
         S = csr_matrix((n, n), dtype=dtype)
@@ -102,105 +100,75 @@ class RESCAL:
             S = S + X[i].T
         _, A = eigsh(csr_matrix(S, dtype=dtype, shape=(n, n)), self.maxVec)
         self.A_full = A.astype(np.float32)
-        print time.time()-tic
-
+        _log.debug("Completed in %f Seconds!"%(time.time()-tic))
         self.X = [shared(csr_gpu(x)) for x in self.X]   
 
-    def set_rank(self, rank):
+    def set_rank(self, rank, history=False):
+        self.history = history
         self.rank = rank
         self.A = self.A_full[:, :rank].copy()
 
-        def oneStep(A, R):
-            A = self._update_A(A, R)
-            R = self._update_R(A)
-            return A,R
+        def oneStep(F, E, U, S, Vt, Shat, A, R):
+            A, F, E = self._update_A(A, R)
+            R, U, S, Vt, Shat = self._update_R(A)
+            return F, E, U, S, Vt, Shat, A, R
        
         Ap = TH.matrix("A")
         Rp = TH.tensor3("R")
-       
-        [A,R], updates = scan(fn=oneStep, outputs_info=[Ap,Rp], n_steps=self.maxIter)
+        Fp = TH.zeros((self.n, self.rank), dtype=np.float32)
+        Ep = TH.zeros((self.rank, self.rank), dtype=np.float32)
+        Up = TH.zeros((self.n, self.rank), dtype=np.float32)
+        Vtp = TH.zeros((self.rank, self.rank), dtype=np.float32)
+        Shatp = TH.zeros((self.rank, self.rank), dtype=np.float32)
+        Sp = TH.zeros((self.rank,), dtype=np.float32)
 
-        print "\tCompiling to GPU".ljust(30),
+        [F, E, U, S, Vt, Shat, A, R], updates = scan(fn=oneStep, outputs_info=[Fp, Ep, Up, Sp, Vtp, Shatp, Ap, Rp], n_steps=self.maxIter)
+
+        _log.debug("Compiling to GPU")
         sys.stdout.flush()
         tic = time.time()
-        self.f = function(inputs=[Ap,Rp], outputs=(A[-1],R[-1]), updates=updates)
-        print time.time()-tic
+        if self.history:
+            self.f = function(inputs=[Ap,Rp], outputs=(F, E, U, S, Vt, Shat, A, R), updates=updates)
+        else:
+            self.f = function(inputs=[Ap,Rp], outputs=(A[-1],R[-1]), updates=updates)
+        _log.debug("Completed in %f Seconds!"%(time.time()-tic))
        
-        print "\tInitializing R".ljust(30),
+        _log.debug("Initializing R")
         sys.stdout.flush()
         tic = time.time()
         Ap = TH.matrix()
-        self.R = function([Ap], self._update_R(Ap))(self.A)
-        print time.time()-tic
-
+        if self.history:
+            self.R, self.U, self.S, self.Vt, self.Shat = function([Ap], self._update_R(Ap))(self.A)
+        else:
+            self.R = function([Ap], self._update_R(Ap)[0])(self.A)
+        _log.debug("Completed in %f Seconds!"%(time.time()-tic))
  
-    def fit(self, lambda_A, lambda_R, history=False):
+    def fit(self, lambda_A, lambda_R, val_data=(None, None)):
         self.lambda_A.set_value(np.float32(lambda_A))
         self.lambda_R.set_value(np.float32(lambda_R))
-
-        self.history = history
-
         Ain = self.A
         Rin = self.R
-
-        #Ap = TH.matrix("A")
-        #Rp = TH.tensor3("R")
-        #update_A = function([Ap, Rp], self._update_A(Ap, Rp))
-        #update_R = function([Ap], self._update_R(Ap))
-        #
-        #print "\tInitializing R".ljust(30),
-        #sys.stdout.flush()
-        #tic = time.time()
-        #if history:
-        #    R,Shat,S = update_R(A)
-        #else:
-        #    R = update_R(A)
-        #print time.time()-tic    
-
-        #if history:
-        #    A_hist = [A]
-        #    R_hist = [R]
-        #    Shat_hist = [Shat]           
-        #    S_hist = [S] 
-        #    E_hist = [np.zeros((self.rank, self.rank))]            
-        #    F_hist = [np.zeros((self.n, self.rank))]            
-
-
-        #for i in range(self.maxIter):
-        #    tic = time.time()
-        #    
-        #    
-        #    if history:
-        #        A, F, E = update_A(A,R)
-        #        R, Shat, S = update_R(A)
-        #        A_hist.append(A)
-        #        R_hist.append(R)
-        #        F_hist.append(F)
-        #        E_hist.append(E)
-        #        Shat_hist.append(Shat)
-        #        S_hist.append(S)
-        #    else: 
-        #        A = update_A(A, R)
-        #        R = update_R(A)
-
-        #    print "\tITER %d\t%f"%(i,time.time()-tic)
-        #   
-        #if history:
-        #    self.F = F_hist
-        #    self.E = E_hist
-        #    self.Shat = Shat_hist
-        #    self.S = S_hist
-        #    self.A = A_hist
-        #    self.R = R_hist
-        #else: 
-        #    self.A = A
-        #    self.R = R
-    
-        
-       
-        print "\tComputing".ljust(30),
-        sys.stdout.flush()
+        _log.debug("Computing".ljust(30))
         tic = time.time()
-        self.A, self.R = self.f(Ain, Rin)
-        print time.time()-tic
+        if self.history:
+            self.F, self.E, U, S, Vt, Shat, A, R = self.f(Ain, Rin)
 
+            # Copy from GPU and Extend Axis
+            self.A = self.A[np.newaxis, :, :]
+            self.R = self.R[np.newaxis, :, :, :]
+            self.U = np.asarray(self.U)[np.newaxis, :, :]
+            self.S = np.asarray(self.S)[np.newaxis, :]
+            self.Vt = np.asarray(self.Vt)[np.newaxis, :, :]
+            self.Shat = np.asarray(self.Shat)[np.newaxis, :, :]
+
+            # Stack Results
+            self.A = np.append(self.A, A, axis=0)
+            self.U = np.append(self.U, U, axis=0)
+            self.S = np.append(self.S, S, axis=0)
+            self.Vt = np.append(self.Vt, Vt, axis=0)
+            self.Shat = np.append(self.Shat, Shat, axis=0)
+            self.R = np.append(self.R, R, axis=0)
+
+        else:
+            self.A, self.R = self.f(Ain, Rin)
+        _log.debug("Completed in %f Seconds!"%(time.time()-tic))

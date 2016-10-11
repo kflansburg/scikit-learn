@@ -1,334 +1,268 @@
-# coding: utf-8
-# rescal.py - python script to compute the RESCAL tensor factorization
-# Copyright (C) 2013 Maximilian Nickel <mnick@mit.edu>
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 import logging
 import time
 import numpy as np
-from numpy import dot, zeros, array, eye, kron, prod
-from numpy.linalg import norm, solve, inv, svd
-from scipy.sparse import csr_matrix, issparse
-from scipy.sparse.linalg import eigsh
-from numpy.random import rand
+import scipy.sparse
 from sklearn.metrics import precision_recall_curve, auc
-
-__version__ = "0.5"
-__all__ = ['als']
-
-_DEF_MAXITER = 100
-_DEF_INIT = 'nvecs'
-_DEF_CONV = 1e-4
-_DEF_LMBDA = 0
-_DEF_ATTR = []
-_DEF_NO_FIT = 1e9
-_DEF_FIT_METHOD = None
+from sklearn.utils.validation import check_random_state
 
 _log = logging.getLogger('RESCAL')
 
-
-def als(X, rank, **kwargs):
-    """
-    RESCAL-ALS algorithm to compute the RESCAL tensor factorization.
-
+class CPURESCAL:
+    """Computes RESCAL decomposition on CPU.
 
     Parameters
     ----------
-    X : list
-        List of frontal slices X_k of the tensor X.
-        The shape of each X_k is ('N', 'N').
-        X_k's are expected to be instances of scipy.sparse.csr_matrix
-    rank : int
-        Rank of the factorization
-    lmbdaA : float, optional
-        Regularization parameter for A factor matrix. 0 by default
-    lmbdaR : float, optional
-        Regularization parameter for R_k factor matrices. 0 by default
-    lmbdaV : float, optional
-        Regularization parameter for V_l factor matrices. 0 by default
-    attr : list, optional
-        List of sparse ('N', 'L_l') attribute matrices. 'L_l' may be different
-        for each attribute
-    init : string, optional
-        Initialization method of the factor matrices. 'nvecs' (default)
-        initializes A based on the eigenvectors of X. 'random' initializes
-        the factor matrices randomly.
-    compute_fit : boolean, optional
-        If true, compute the fit of the factorization compared to X.
-        For large sparse tensors this should be turned of. None by default.
-    maxIter : int, optional
-        Maximium number of iterations of the ALS algorithm. 500 by default.
-    conv : float, optional
-        Stop when residual of factorization is less than conv. 1e-5 by default
+    random_state : int, RandomState instance, or None (default)
+        The seed of the pseudo random number generator that selects
+        a random feature to update. Useful only when selection is set to
+        'random'.
 
-    Returns
+    Attributes
     -------
-    A : ndarray
-        array of shape ('N', 'rank') corresponding to the factor matrix A
-    R : list
-        list of 'M' arrays of shape ('rank', 'rank') corresponding to the
-        factor matrices R_k
-    fval : float
-        function value of the factorization
+    A : [np.array] if history else np.array
+        Array of shape (N, rank) representing the factor matrix A.
+
+    R : [[np.array]] if history else [np.array]
+        list of K arrays of shape (rank, rank) corresponding to the
+        factor matrices R_k. 
+
+    U : [np.array] if history else None
+    S : [np.array] if history else None
+    Vt : [np.array] if history else None
+    Shat : [np.array] if history else None
+    F : [np.array] if history else None
+    E : [np.array] if history else None
+        Histories of various intermediate values when updating A and R.
+
+    fit : [float]
+        List of AUC fits for each iteration. 
+
+    execttimes : [float]
+        List of times per iteration.
+
     itr : int
-        number of iterations until convergence
-    exectimes : ndarray
-        execution times to compute the updates in each iteration
-
-    Examples
-    --------
-    >>> X1 = csr_matrix(([1,1,1], ([2,1,3], [0,2,3])), shape=(4, 4))
-    >>> X2 = csr_matrix(([1,1,1,1], ([0,2,3,3], [0,1,2,3])), shape=(4, 4))
-    >>> A, R, fval, iter, exectimes = rescal([X1, X2], 2)
-
-    See
-    ---
-    For a full description of the algorithm see:
-    .. [1] Maximilian Nickel, Volker Tresp, Hans-Peter-Kriegel,
-        "A Three-Way Model for Collective Learning on Multi-Relational Data",
-        ICML 2011, Bellevue, WA, USA
-
-    .. [2] Maximilian Nickel, Volker Tresp, Hans-Peter-Kriegel,
-        "Factorizing YAGO: Scalable Machine Learning for Linked Data"
-        WWW 2012, Lyon, France
+        Number of iterations until convergence.
     """
 
-    # ------------ init options ----------------------------------------------
-    ainit = kwargs.pop('init', _DEF_INIT)
-    maxIter = kwargs.pop('maxIter', _DEF_MAXITER)
-    conv = kwargs.pop('conv', _DEF_CONV)
-    lmbdaA = kwargs.pop('lambda_A', _DEF_LMBDA)
-    lmbdaR = kwargs.pop('lambda_R', _DEF_LMBDA)
-    lmbdaV = kwargs.pop('lambda_V', _DEF_LMBDA)
-    history = kwargs.pop('history', False)
-    verbose = kwargs.pop('verbose', False)
-    val_data = kwargs.pop('val_data',None)
-    func_compute_fval = kwargs.pop('compute_fval', _DEF_FIT_METHOD)
-    orthogonalize = kwargs.pop('orthogonalize', False)
-    P = kwargs.pop('attr', _DEF_ATTR)
-    dtype = kwargs.pop('dtype', np.float)
+    def __init__(self, **kwargs):
+        self.rng = check_random_state(kwargs.pop('random_state', None))
+    
+        if not len(kwargs) == 0:
+            raise ValueError('Unknown keywords (%s)' % (kwargs.keys()))
 
-    # ------------- check input ----------------------------------------------
-    if not len(kwargs) == 0:
-        raise ValueError('Unknown keywords (%s)' % (kwargs.keys()))
+    def __validate_tensor(self):
+        X = self.X
+        assert type(X)==list, "X must be a list of sparse matrices"
 
-    # check frontal slices have same size and are matrices
-    sz = X[0].shape
-    for i in range(len(X)):
-        if X[i].ndim != 2:
-            raise ValueError('Frontal slices of X must be matrices')
-        if X[i].shape != sz:
-            raise ValueError('Frontal slices of X must be all of same shape')
-        #if not issparse(X[i]):
-            #raise ValueError('X[%d] is not a sparse matrix' % i)
+        for i in range(self.K):
+            assert X[i].ndim == 2, 'Frontal slices of X must be matrices.'
+            assert X[i].shape == (self.N, self.N), 'Frontal slices of X must be all of same shape and square.'
 
-    func_compute_fval=None
+        self.X = [ x.tocsr() for x in self.X ]
+        for x in self.X: x.sort_indices() 
 
-    n = sz[0]
-    k = len(X)
+    def __initialize_A(self):
+        _log.debug('Initializing A')
 
-    _log.debug(
-        '[Config] rank: %d | maxIter: %d | conv: %7.1e | lmbda: %7.1e' %
-        (rank, maxIter, conv, lmbdaA)
-    )
-    _log.debug('[Config] dtype: %s / %s' % (dtype, X[0].dtype))
+        if self.init=='rand':
+            A = self.rng.rand(self.N, self.max_rank)
 
-    # ------- convert X and P to CSR ------------------------------------------
-    for i in range(k):
-        if issparse(X[i]):
-            X[i] = X[i].tocsr()
-            X[i].sort_indices()
-    for i in range(len(P)):
-        if issparse(P[i]):
-            P[i] = P[i].tocoo().tocsr()
-            P[i].sort_indices()
+        elif self.init=='eigs':
+            S = scipy.sparse.csr_matrix((self.N, self.N))
+            for i in range(self.K):
+                S += self.X[i]
+                S += self.X[i].T
+            _, A = scipy.sparse.linalg.eigsh(S, self.max_rank)
 
-
-
-
-    # ---------- initialize A ------------------------------------------------
-    _log.debug('Initializing A')
-    if ainit == 'random':
-        A = array(rand(n, rank), dtype=dtype)
-    elif ainit == 'nvecs':
-        S = csr_matrix((n, n), dtype=dtype)
-        for i in range(k):
-            S = S + X[i]
-            S = S + X[i].T
-        _, A = eigsh(csr_matrix(S, dtype=dtype, shape=(n, n)), rank)
-        A = array(A, dtype=dtype)
-    else:
-        raise ValueError('Unknown init option ("%s")' % ainit)
-
-    # ------- initialize R and Z ---------------------------------------------
-    R, Shat, S = _updateR(X, A, lmbdaR)
-    Z = _updateZ(A, P, lmbdaV)
-
-    # precompute norms of X
-    normX = [sum(M.data ** 2) for M in X]
-
-    if history:
-        F_hist = [np.zeros((n,rank))]
-        E_hist = [np.zeros((rank,rank))]
-        R_hist = [R]
-        Shat_hist = [Shat]
-        S_hist = [S]
-        A_hist = [A]
-
-
-    #  ------ compute factorization ------------------------------------------
-    fit = fitchange = fitold = f = 0
-    exectimes = []
-    itr = 0
-
-    for itr in range(maxIter):
-        tic = time.time()
-        fitold = fit
-
-        A, F, E = _updateA(X, A, R, P, Z, lmbdaA, orthogonalize)
-        R, Shat, S = _updateR(X, A, lmbdaR)
-
-        if history:
-            A_hist.append(A)
-            F_hist.append(F)
-            E_hist.append(E)
-            R_hist.append(R)
-            Shat_hist.append(Shat)
-            S_hist.append(S)
-
-        Z = _updateZ(A, P, lmbdaV)
-
-
-        if val_data:
-            fit = compute_auc(A, R, val_data[0], val_data[1])
         else:
-            fit = np.Inf
+            raise ValueError('Unknown init option.')
 
-        fitchange = abs(fitold - fit)
+        self.init_A = A
 
-        toc = time.time()
-        exectimes.append(toc - tic)
-        #print "ITER: %d, SECS: %f"%(itr, exectimes[-1])
-        _log.debug('[%3d] fval: %0.5f | delta: %7.1e | secs: %.5f' % (
-            itr, fit, fitchange, exectimes[-1]
-        ))
+    def set_x(self, X, max_rank, **kwargs):
+        """Sets X, and initializes A. 
+        
+        This is a seperate function so that multiple runs do not have to 
+        reinitialize A.
 
-        if itr > 0 and fitchange < conv:
-            break
+        Parameters
+        ----------
+        X : [scipy.sparse.spmatrix]
+            List of frontal slices X_k of the tensor X.
+            The shape of each X_k is (N, N).
+   
+        max_rank : int
+            The largest rank you expect to use. This controls how large
+            A is when it is initialized.
+ 
+        init : string, optional
+            Initialization method of the factor matrices. 'eigs' (default)
+            initializes A based on the eigenvectors of X. 'random' initializes
+            the factor matrices randomly.
+        """
+        
+        self.init = kwargs.pop('init', 'eigs')
+        self.max_rank = max_rank
 
-    if history:
-        return A_hist, R_hist, f, itr + 1, array(exectimes), Shat_hist, S_hist, F_hist, E_hist
-    else:
-        return A, R, f, itr + 1, array(exectimes)
+        self.X = X
+        self.K = len(X)
+        self.N = X[0].shape[0]
+        self.__validate_tensor()
+        
+        self.__initialize_A()
 
+    def __update_A(self):
+        if self.history: A = self.A[-1]
+        else: A = self.A
+        if self.history: R = self.R[-1]
+        else: R = self.R
 
-def compute_auc(A, R, X_test, y_test):
-    y_pred = []
-    for row in X_test:
-        slice, row, col = row
-        y_pred.append(A[row,:].dot(R[slice]).dot(A[col,:].T))
-    y_pred = np.array(y_pred)
-    prec, recall, _ = precision_recall_curve(y_test, y_pred)
-    return auc(recall, prec)
+        F = np.zeros((self.N, self.rank))
+        E = np.zeros((self.rank, self.rank))
 
-# ------------------ Update A ------------------------------------------------
-def _updateA(X, A, R, P, Z, lmbdaA, orthogonalize):
-    """Update step for A"""
-    n, rank = A.shape
-    F = zeros((n, rank), dtype=A.dtype)
-    E = zeros((rank, rank), dtype=A.dtype)
+        AtA = np.dot(A.T, A)
 
-    AtA = dot(A.T, A)
+        for i in range(self.K):
+            F += self.X[i].dot( np.dot(A, R[i].T)) + self.X[i].T.dot(np.dot(A, R[i]))
+            E += np.dot(R[i], np.dot(AtA, R[i].T)) + np.dot(R[i].T, np.dot(AtA, R[i]))
 
-    for i in range(len(X)):
-        F += X[i].dot(dot(A, R[i].T)) + X[i].T.dot(dot(A, R[i]))
-        E += dot(R[i], dot(AtA, R[i].T)) + dot(R[i].T, dot(AtA, R[i]))
+        I = self.lambda_A * np.eye(self.rank)
 
-    # regularization
-    I = lmbdaA * eye(rank, dtype=A.dtype)
-
-    # finally compute update for A
-    A = solve(I + E.T, F.T).T, F, E
-
-    return orth(A) if orthogonalize else A
-
-
-# ------------------ Update R ------------------------------------------------
-def _updateR(X, A, lmbdaR):
-    rank = A.shape[1]
-    U, S, Vt = svd(A, full_matrices=False)
-    Shat = kron(S, S)
-
-    B = np.outer(S, S)
-    B = B/(B**2 + lmbdaR)
-    Shat = (Shat / (Shat ** 2 + lmbdaR)).reshape(rank, rank)
-
-    R = []
-    for i in range(len(X)):
-        Rn = Shat * dot(U.T, X[i].dot(U))
-        Rn = dot(Vt.T, dot(Rn, Vt))
-        R.append(Rn)
-    return R, Shat, S
-
-
-# ------------------ Update Z ------------------------------------------------
-def _updateZ(A, P, lmbdaZ):
-    Z = []
-    if len(P) == 0:
-        return Z
-    #_log.debug('Updating Z (Norm EQ, %d)' % len(P))
-    pinvAt = inv(dot(A.T, A) + lmbdaZ * eye(A.shape[1], dtype=A.dtype))
-    pinvAt = dot(pinvAt, A.T).T
-    for i in range(len(P)):
-        if issparse(P[i]):
-            Zn = P[i].tocoo().T.tocsr().dot(pinvAt).T
+        A = np.linalg.solve(I + E.T, F.T).T
+        
+        if self.history:
+            self.A.append(A)
+            self.F.append(F)
+            self.E.append(E)
         else:
-            Zn = dot(pinvAt.T, P[i])
-        Z.append(Zn)
-    return Z
+            self.A = A
 
+    def __update_R(self):
+        if self.history: A = self.A[-1]
+        else: A = self.A
 
-def _compute_fval(X, A, R, P, Z, lmbdaA, lmbdaR, lmbdaZ, normX):
-    """Compute fit for full slices"""
-    f = lmbdaA * norm(A) ** 2
-    for i in range(len(X)):
-        ARAt = dot(A, dot(R[i], A.T))
-        f += (norm(X[i] - ARAt) ** 2) / normX[i] + lmbdaR * norm(R[i]) ** 2
-    return f
+        U, S, Vt = np.linalg.svd(A, full_matrices=False)
+        
+        Shat = np.kron(S, S)
+        Shat = (Shat / (Shat ** 2 + self.lambda_R)).reshape(self.rank, self.rank)
 
+        R = []
+        for i in range(self.K):
+            Rn = Shat * np.dot(U.T, self.X[i].dot(U))
+            Rn = np.dot(Vt.T, np.dot(Rn, Vt))
+            R.append(Rn)
 
-def _compute_fval_orth(X, A, R, P, Z, lmbdaA, lmbdaR, lmbdaZ, normX):
-    f = lmbdaA * norm(A) ** 2
-    for i in range(len(X)):
-        f += (normX[i] - norm(R[i]) ** 2) / normX[i] + lmbdaR * norm(R[i]) ** 2
-    return f
+        if self.history:
+            self.U.append(U)
+            self.S.append(S)
+            self.Vt.append(Vt)
+            self.Shat.append(Shat)
+            self.R.append(R)
+        else:
+            self.R = R
 
+    def predict(self, X_test):
+        if self.history: 
+            A = self.A[-1]
+            R = self.R[-1]
+        else:
+            A = self.A
+            R = self.R
 
-def sptensor_to_list(X):
-    from scipy.sparse import lil_matrix
-    if X.ndim != 3:
-        raise ValueError('Only third-order tensors are supported (ndim=%d)' % X.ndim)
-    if X.shape[0] != X.shape[1]:
-        raise ValueError('First and second mode must be of identical length')
-    N = X.shape[0]
-    K = X.shape[2]
-    res = [lil_matrix((N, N)) for _ in range(K)]
-    for n in range(X.nnz()):
-        res[X.subs[2][n]][X.subs[0][n], X.subs[1][n]] = X.vals[n]
-    return res
+        y_pred = []
+        for row in self.X_test:
+            slice, row, col = row
+            y_pred.append(A[row,:].dot(R[slice]).dot(A[col,:].T))
+        return np.array(y_pred)
 
-def orth(A):
-    [U, _, Vt] = svd(A, full_matrices=0)
-    return dot(U, Vt)
+    def __compute_auc(self): 
+        if self.X_test is not None and self.y_test is not None:
+            y_pred = self.predict(self.X_test)
+            prec, recall, _ = precision_recall_curve(self.y_test, y_pred)
+            self.fit.append(auc(recall, prec))
+            self.fitchange = abs(self.fit[-1] - self.fit[-2])
+        else:
+            self.fit.append(np.Inf)
+            self.fitchange = np.Inf
+
+    def __one_step(self):
+        self.__update_A()
+        self.__update_R()
+        self.__compute_auc()
+
+    def fit(self, rank, **kwargs):
+        """
+        lambda_A : float, optional
+            Regularization parameter for A factor matrix. 0.0 by default.
+    
+        lambda_R : float, optional
+            Regularization parameter for R_k factor matrices. 0.0 by default.
+    
+        val_data: (X: np.array, y: np.array)
+            Indecies to use for validating the tensor. 
+            First array, X, has rows of [slice_idx, row_idx, col_idx], and 
+            the corresponding row in the second array, y, has the target 
+            value for that index. If not specified, fit is not calculated. 
+    
+        max_iter : int, optional
+            Maximium number of iterations of the ALS algorithm. 50 by default.
+    
+        conv : float, optional
+            Stop when residual of factorization is less than conv. 1e-5 by default.
+    
+        history : boolean, optional
+            Returns a copy of results for each iteration to allow validation. 
+        """    
+
+        self.rank = rank
+        self.max_iter = kwargs.pop('max_iter', 50)
+        self.conv = kwargs.pop('conv', 10e-6)
+        self.lambda_A = kwargs.pop('lambda_A', 0.0)
+        self.lambda_R = kwargs.pop('lambda_R', 0.0)
+        self.history = kwargs.pop('history', False)
+        self.X_test, self.y_test = kwargs.pop('val_data',(None, None))
+
+        if self.history:
+            self.U = []
+            self.S = []
+            self.Vt = []
+            self.Shat = []
+            self.R = []
+            self.A = []
+            self.F = []
+            self.E = []
+
+        _log.debug(
+            '[Config] rank: %d | maxIter: %d | conv: %7.1e | lmbda: %7.1e' %
+            (self.rank, self.max_iter, self.conv, self.lambda_A)
+        )
+
+        if self.history: self.A = [self.init_A[:,:rank]]
+        else: self.A = self.init_A[:,:rank]
+        self.__update_R()
+            
+        self.exectimes = []
+        self.fit = [np.Inf]
+        
+        for i in range(self.max_iter):
+            tic = time.time()
+            self.__one_step()
+            self.exectimes.append(time.time()-tic)
+            
+            _log.debug('[%3d] fval: %0.5f | delta: %7.1e | secs: %.5f' % (
+                i, self.fit[-1], self.fitchange, self.exectimes[-1]
+            ))
+
+            if i > 0 and self.fitchange < self.conv:
+                self.itr=i
+                break
+
+        if self.history:
+            self.A = np.array(self.A)
+            self.R = np.array(self.R)
+            self.F = np.array(self.F)
+            self.E = np.array(self.E)
+            self.U = np.array(self.U)
+            self.S = np.array(self.S)
+            self.Vt = np.array(self.Vt)
+            self.Shat = np.array(self.Shat)
