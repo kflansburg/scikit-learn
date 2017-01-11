@@ -170,7 +170,7 @@ class CPURESCAL:
             R = self.R
 
         y_pred = []
-        for row in self.X_test:
+        for row in X_test:
             slice, row, col = row
             y_pred.append(A[row,:].dot(R[slice]).dot(A[col,:].T))
         return np.array(y_pred)
@@ -178,11 +178,16 @@ class CPURESCAL:
     def __compute_auc(self): 
         if self.X_test is not None and self.y_test is not None:
             y_pred = self.predict(self.X_test)
-            prec, recall, _ = precision_recall_curve(self.y_test, y_pred)
-            self.fit.append(auc(recall, prec))
-            self.fitchange = abs(self.fit[-1] - self.fit[-2])
+            try:
+                prec, recall, _ = precision_recall_curve(self.y_test, y_pred)
+            except ValueError as e:
+                print self.y_test
+                print y_pred
+                raise ValueError(e)
+            self.fits.append(auc(recall, prec))
+            self.fitchange = abs(self.fits[-1] - self.fits[-2])
         else:
-            self.fit.append(np.Inf)
+            self.fits.append(np.Inf)
             self.fitchange = np.Inf
 
     def __one_step(self):
@@ -237,12 +242,12 @@ class CPURESCAL:
             (self.rank, self.max_iter, self.conv, self.lambda_A)
         )
 
-        if self.history: self.A = [self.init_A[:,:rank]]
-        else: self.A = self.init_A[:,:rank]
+        if self.history: self.A = [self.init_A[:,:rank].copy()]
+        else: self.A = self.init_A[:,:rank].copy()
         self.__update_R()
             
         self.exectimes = []
-        self.fit = [np.Inf]
+        self.fits = [np.Inf]
         
         for i in range(self.max_iter):
             tic = time.time()
@@ -250,7 +255,7 @@ class CPURESCAL:
             self.exectimes.append(time.time()-tic)
             
             _log.debug('[%3d] fval: %0.5f | delta: %7.1e | secs: %.5f' % (
-                i, self.fit[-1], self.fitchange, self.exectimes[-1]
+                i, self.fits[-1], self.fitchange, self.exectimes[-1]
             ))
 
             if i > 0 and self.fitchange < self.conv:

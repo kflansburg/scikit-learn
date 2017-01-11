@@ -36,7 +36,7 @@ config.floatX = 'float32'
 
 
 class RESCAL:
-    def __init__(self, maxIter=50, maxVec=100):
+    def __init__(self, maxIter=30, maxVec=100):
         self.maxIter = maxIter
         self.lambda_A = shared(np.float32(0.0))
         self.lambda_R = shared(np.float32(0.0))

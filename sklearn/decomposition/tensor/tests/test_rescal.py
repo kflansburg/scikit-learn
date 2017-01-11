@@ -2,7 +2,7 @@ from scipy.io.matlab import loadmat
 from scipy.sparse import coo_matrix
 from sklearn.decomposition.tensor.rescal import RESCAL
 from sklearn.decomposition.tensor.preprocessing import train_test_split, trial_tensor
-from sklearn.metrics import precision_recall_curve, auc
+from sklearn.metrics import precision_recall_curve, auc, roc_auc_score
 import numpy as np
 
 import logging
@@ -26,11 +26,12 @@ def predict(X_test, A, R):
 
 def compute_auc(X_test, y_test, A, R): 
         y_pred = predict(X_test, A, R)
-        prec, recall, _ = precision_recall_curve(y_test, y_pred)
-        return auc(recall, prec)
+        #prec, recall, _ = precision_recall_curve(y_test, y_pred)
+        #return auc(recall, prec)
+        return roc_auc_score(y_test, y_pred)
 
 def test_gpurescal():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]).tocsr() for i in range(k)]
@@ -38,32 +39,36 @@ def test_gpurescal():
     TT = trial_tensor(T, idxs[0])
 
     RCPU = RESCAL(50)
-    RCPU.fit(TT, val_data=(idxs[0][1], idxs[0][3]), lambda_A=0.0, lambda_R=0.0, history=True, conv=0.0, max_iter=50)
+    RCPU.fit(TT, val_data=(idxs[0][1], idxs[0][3]), lambda_A=0.0, lambda_R=0.0, history=True, conv=0.0, max_iter=30)
 
     Ainit = RCPU.R.A[0].astype(np.float32)
 
     RGPU = RESCAL(50, gpu=True)
     RGPU.fit(TT, val_data=(idxs[0][1], idxs[0][3]), lambda_A=0.0, lambda_R=0.0, A=Ainit)
 
+    results = {}
+    dims = {}
     for sym in ["A","R","F","E","S","U","Vt","Shat"]:
+        results[sym] = []
+
         XGPU = eval("RGPU.R.%s"%(sym))
         XCPU = eval("RCPU.R.%s"%(sym))
-        print sym
-        print "GPU", " x ".join(map(str, XGPU.shape))
-        print "CPU", " x ".join(map(str, XCPU.shape))
-
         assert XGPU.shape==XCPU.shape, "Iterations between CPU and GPU mismatch. %s\t%s"%(repr(XGPU.shape), repr(XCPU.shape))
+        dims[sym] = " x ".join(map(str, XGPU.shape[1:]))
+
         for i in range(XGPU.shape[0]):
             if XGPU.ndim==3:
-                print "\t",i,np.linalg.norm(XGPU[i,:,:] - XCPU[i,:,:], 'fro')
+                nrm = np.linalg.norm(XGPU[i,:,:] - XCPU[i,:,:], 'fro')
             elif XGPU.ndim==2:
-                print "\t",i,np.linalg.norm(XGPU[i,:] - XCPU[i,:], 2)
+                nrm = np.linalg.norm(XGPU[i,:] - XCPU[i,:], 2)
             elif XGPU.ndim==4:
                 nrm = 0.0
                 for j in range(XGPU.shape[1]):
                     nrm+= np.linalg.norm(XGPU[i,j,:,:] - XCPU[i,j,:,:], 'fro')
-                print "\t",i,nrm
+            results[sym].append(nrm)
 
+    results['AUC'] = []
+    dims['AUC'] = ""
     for i in range(RGPU.R.A.shape[0]):
         A = RGPU.R.A[i,:,:]
         R = RGPU.R.R[i,:,:,:]
@@ -72,7 +77,23 @@ def test_gpurescal():
         A = RCPU.R.A[i,:,:]
         R = RCPU.R.R[i,:,:,:]
         aucCPU = compute_auc(idxs[0][1], idxs[0][3], A, R)
-        print i, "\tCPU", aucCPU, "\tGPU", aucGPU 
+        results['AUC'].append(aucCPU-aucGPU)
+
+    
+    print "{: ^5s}".format("ITER") + "||" + "|".join(map(lambda s: "{: ^12s}".format(s), dims.keys()))
+    print "{: ^5s}".format("") + "||" + "|".join(map(lambda s: "{: ^12s}".format(s), dims.values()))
+    print "="*123 
+    N = max(map(lambda l: len(l), results.values()))
+    for k,v in results.iteritems():
+        if len(v)<N:
+            results[k] = [ np.Inf ] * ( N - len(v) ) + v
+
+    for i in range(N):
+        r = map(lambda l: l[i], results.values())
+        print "{: ^5d}".format(i) + "||" +"|".join(map(lambda s: "{: ^12.2e}".format(s), r))
+        
+
+
 
 #def test_cpurescal():
 #    mat = loadmat('tests/alyawarradata.mat')

@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.decomposition.tensor.preprocessing import train_test_split, trial_tensor
 
 def test_trial_tensor():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]).tocsr() for i in range(k)]
@@ -24,7 +24,7 @@ def test_trial_tensor():
         assert np.count_nonzero(TT[slice][x[:,1], x[:,2]]) > 0 or np.count_nonzero(T[slice][x[:,1], x[:,2]]) == 0
 
 def test_train_test_split():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]) for i in range(k)]
@@ -44,7 +44,7 @@ def test_train_test_split():
 
 
 def test_train_test_split_slice():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]) for i in range(k)]
@@ -58,7 +58,7 @@ def test_train_test_split_slice():
 
 @raises(AssertionError)
 def test_train_test_split_insufficient_tp():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]) for i in range(k)]
@@ -68,7 +68,7 @@ def test_train_test_split_insufficient_tp():
 
 @raises(AssertionError)
 def test_train_test_split_insufficient_tn():
-    mat = loadmat('tests/alyawarradata.mat')
+    mat = loadmat('sklearn/decomposition/tensor/tests/alyawarradata.mat')
     K = np.array(mat['Rs'], np.float32)
     e, k = K.shape[0], K.shape[2]
     T = [coo_matrix(K[:, :, i]) for i in range(k)]

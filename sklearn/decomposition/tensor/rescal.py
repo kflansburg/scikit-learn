@@ -25,10 +25,11 @@ class RESCAL:
         WWW 2012, Lyon, France
 
     """
-    def __init__(self, rank, gpu=False, random_state=None):
-        self.rank = rank
+    def __init__(self, max_rank, gpu=False, random_state=None):
+        self.max_rank = max_rank
         self.gpu = gpu
         if gpu:
+            raise NotImplementedError("GPU Not Implemented")
             from gpurescal import RESCAL
             from skcuda.misc import init as ginit
             ginit()
@@ -38,17 +39,17 @@ class RESCAL:
             from cpurescal import CPURESCAL as RESCAL
             self.R = RESCAL(random_state=random_state)
 
-    def fit(self, X, **kwargs):
-    
+    def set_x(self, X):
+        self.R.set_x(X, self.max_rank)
+
+    def fit(self, rank, **kwargs):
         if self.gpu:
-            self.R.setX(X)
             if "A" in kwargs:
                 self.R.A_full = kwargs["A"]
             self.R.set_rank(self.rank, history=True)
             self.R.fit(0.0,0.0)    
         else:
-            self.R.set_x(X, self.rank)
-            self.R.fit(self.rank, **kwargs)
+            self.R.fit(rank, **kwargs)
 
     def predict(self, X_test):
-        self.R.predict(X_test)
+        return self.R.predict(X_test)
