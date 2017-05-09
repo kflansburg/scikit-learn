@@ -46,7 +46,8 @@ class CPURESCAL:
 
     def __init__(self, **kwargs):
         self.rng = check_random_state(kwargs.pop('random_state', None))
-    
+        self.init = kwargs.pop('init', 'eigs')
+
         if not len(kwargs) == 0:
             raise ValueError('Unknown keywords (%s)' % (kwargs.keys()))
 
@@ -62,21 +63,24 @@ class CPURESCAL:
         for x in self.X: x.sort_indices() 
 
     def __initialize_A(self):
-        _log.debug('Initializing A')
 
+        tic = time.time()
         if self.init=='rand':
+            _log.debug('Initializing A Randomly')
             A = self.rng.rand(self.N, self.max_rank)
 
         elif self.init=='eigs':
+            _log.debug('Initializing A By Eigendecompostion')
             S = scipy.sparse.csr_matrix((self.N, self.N))
             for i in range(self.K):
                 S += self.X[i]
                 S += self.X[i].T
             _, A = scipy.sparse.linalg.eigsh(S, self.max_rank)
-
+    
         else:
             raise ValueError('Unknown init option.')
 
+        _log.debug("DONE: %f Seconds."%(time.time() - tic))
         self.init_A = A
 
     def set_x(self, X, max_rank, **kwargs):
@@ -101,7 +105,6 @@ class CPURESCAL:
             the factor matrices randomly.
         """
         
-        self.init = kwargs.pop('init', 'eigs')
         self.max_rank = max_rank
 
         self.X = X

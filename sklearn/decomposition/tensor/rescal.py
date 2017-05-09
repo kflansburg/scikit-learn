@@ -25,7 +25,7 @@ class RESCAL:
         WWW 2012, Lyon, France
 
     """
-    def __init__(self, max_rank, gpu=False, random_state=None):
+    def __init__(self, max_rank, gpu=False, random_state=None, init='eigs'):
         self.max_rank = max_rank
         self.gpu = gpu
         if gpu:
@@ -37,7 +37,7 @@ class RESCAL:
             
         else:
             from cpurescal import CPURESCAL as RESCAL
-            self.R = RESCAL(random_state=random_state)
+            self.R = RESCAL(random_state=random_state, init=init)
 
     def set_x(self, X):
         self.R.set_x(X, self.max_rank)
